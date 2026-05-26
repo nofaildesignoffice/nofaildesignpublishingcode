@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>어썸웰스파 코스메틱 총판 수익 시뮬레이터</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Pretendard Variable', Pretendard, -apple-system, sans-serif; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+const VAT = 1.1;
+const exVat = (v) => v / VAT;
+
+// 코스메틱 제품 목록 (가격: 원 단위, 부가세 포함)
+// cost = 어썸웰스파 매입가 + 부가세 (매입가+부가세)
+// partner = 가맹점 판매가 (어썸웰스파가 + 마진)
+// general = 표준소비자가
+const PRODUCTS = [
+  { id: "vitaC_set", name: "비타C 앰플세트", sub: "15ml×3, 10ml", emoji: "💧", cost: 38000 + 3800, partner: 69000, general: 165000, unit: "카톤(10개)" },
+  { id: "nutrition", name: "뉴트리션 크림", sub: "50ml", emoji: "🧴", cost: 27000 + 2700, partner: 49000, general: 119000, unit: "카톤(20개)" },
+  { id: "vitaC_mask", name: "비타C 마스크", sub: "16g×5ea", emoji: "🎭", cost: 6500 + 650, partner: 12000, general: 27500, unit: "카톤(40개)" },
+  { id: "sun_cream", name: "선크림", sub: "50ml", emoji: "☀️", cost: 9000 + 900, partner: 17000, general: 33000, unit: "카톤(20개)" },
+  { id: "oil_mist_120", name: "오일미스트 리필", sub: "120ml", emoji: "✨", cost: 10000 + 1000, partner: 19000, general: 45000, unit: "카톤(20개)" },
+  { id: "oil_mist_80", name: "오일미스트", sub: "80ml", emoji: "💨", cost: 10000 + 1000, partner: 18000, general: 33000, unit: "카톤(30개)" },
+  { id: "powder_wash", name: "파우더워시", sub: "65g", emoji: "🫧", cost: 9000 + 900, partner: 16000, general: 28000, unit: "카톤(30개)" },
+];
+
+const TAX_BRACKETS = [
+  { max: 14000000, rate: 0.06, ded: 0 },
+  { max: 50000000, rate: 0.15, ded: 1260000 },
+  { max: 88000000, rate: 0.24, ded: 5760000 },
+  { max: 150000000, rate: 0.35, ded: 15440000 },
+  { max: 300000000, rate: 0.38, ded: 19940000 },
+  { max: 500000000, rate: 0.40, ded: 25940000 },
+  { max: 1000000000, rate: 0.42, ded: 35940000 },
+  { max: Infinity, rate: 0.45, ded: 65940000 },
+];
+
+function incomeTax(income) {
+  if (income <= 0) return 0;
+  for (const b of TAX_BRACKETS) {
+    if (income <= b.max) return income * b.rate - b.ded;
+  }
+  return 0;
+}
+
+function fmtWon(n) {
+  const abs = Math.abs(n);
+  if (abs >= 100000000) return (n / 100000000).toFixed(1) + "억";
+  if (abs >= 10000) return Math.round(n / 10000).toLocaleString() + "만원";
+  return Math.round(n).toLocaleString() + "원";
+}
+
+function calcPnL(salesArr, channel, fixedMonthly, mult, commissionRate = 0) {
+  let totalRevInc = 0, totalCostInc = 0;
+  const lines = salesArr.map((s) => {
+    const prod = PRODUCTS.find((p) => p.id === s.id);
+    const priceInc = channel === "partner" ? prod.partner : prod.general;
+    const costInc = prod.cost;
+    const units = s.qty * mult;
+    const rev = priceInc * units;
+    const cost = costInc * units;
+    const gross = rev - cost;
+    totalRevInc += rev;
+    totalCostInc += cost;
+    return { ...prod, units, rev, cost, gross, marginPerUnit: priceInc - costInc, marginPct: rev > 0 ? (gross / rev) * 100 : 0 };
+  });
+
+  // 매출총이익 = 판매가(포함) - 매입가(포함)
+  const totalGross = totalRevInc - totalCostInc;
+  const commission = totalRevInc * (commissionRate / 100);
+  const fixed = fixedMonthly * mult;
+  const opProfit = totalGross - fixed - commission;
+  const opMargin = totalRevInc > 0 ? (opProfit / totalRevInc) * 100 : 0;
+
+  // 부가세: 매출세액 - 매입세액 (별도 납부)
+  const vatSales = totalRevInc - exVat(totalRevInc);
+  const vatPurchase = totalCostInc - exVat(totalCostInc);
+  const vatPayable = vatSales - vatPurchase;
+
+  // 종소세: 연간 과세표준 기준 (영업이익 - 부가세 차감 전)
+  const annualOp = mult === 1 ? opProfit * 12 : opProfit;
+  const taxableIncome = Math.max(0, annualOp);
+
+  let bracketLabel = "", bracketRate = 0, bracketDed = 0;
+  for (const b of TAX_BRACKETS) {
+    if (taxableIncome <= b.max) {
+      bracketRate = b.rate;
+      bracketDed = b.ded;
+      bracketLabel = `${(b.rate * 100).toFixed(0)}%`;
+      break;
+    }
+  }
+
+  const annualTax = incomeTax(taxableIncome);
+  const effectiveRate = taxableIncome > 0 ? (annualTax / taxableIncome) * 100 : 0;
+  const tax = mult === 1 ? annualTax / 12 : annualTax;
+  const localTax = tax * 0.1;
+
+  const net = opProfit - tax - localTax - vatPayable;
+  const netMargin = totalRevInc > 0 ? (net / totalRevInc) * 100 : 0;
+
+  return {
+    lines, totalRevInc, totalCostInc, totalGross,
+    commission, fixed, opProfit, opMargin,
+    vatSales, vatPurchase, vatPayable,
+    taxableIncome, bracketLabel, bracketRate, bracketDed, annualTax,
+    tax, effectiveRate, localTax,
+    net, netMargin,
+  };
+}
+
+function PnLCard({ title, color, result, period }) {
+  const periodLabel = period === 1 ? "월" : "연";
+  const isPositive = result.net >= 0;
+  return (
+    <div style={{
+      background: "#fff", borderRadius: 14, overflow: "hidden",
+      boxShadow: "0 1px 4px rgba(0,0,0,0.07)",
+    }}>
+      <div style={{
+        background: color, padding: "14px 18px", color: "#fff",
+        fontSize: 14, fontWeight: 800,
+      }}>
+        {title} — {periodLabel}간
+      </div>
+      <div style={{ padding: "16px 18px" }}>
+        {result.lines.map((l) => (
+          <div key={l.id} style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "8px 0", borderBottom: "1px solid #f0ede8",
+          }}>
+            <div>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>{l.emoji} {l.name}</span>
+              <span style={{ fontSize: 11, color: "#999", marginLeft: 6 }}>{l.units}개</span>
+              <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
+                개당 마진 {Math.round(l.marginPerUnit).toLocaleString()}원 · 마진율 {l.marginPct.toFixed(0)}%
+              </div>
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 800, color: l.gross >= 0 ? "#2D6A4F" : "#C1121F" }}>
+              {fmtWon(l.gross)}
+            </span>
+          </div>
+        ))}
+
+        <div style={{ marginTop: 14, fontSize: 13 }}>
+          {[
+            { label: "매출액 (부가세 포함)", val: result.totalRevInc },
+            { label: "매입원가", val: -result.totalCostInc },
+            { label: "매출총이익", val: result.totalGross, bold: true },
+            { label: `위탁수수료 (${result.commission > 0 ? (result.commission / result.totalRevInc * 100).toFixed(1) : 0}%)`, val: -result.commission },
+            { label: `고정비 (${periodLabel})`, val: -result.fixed },
+            { label: "영업이익", val: result.opProfit, bold: true, big: true },
+          ].map((r, i) => (
+            <div key={i} style={{
+              display: "flex", justifyContent: "space-between",
+              padding: r.bold ? "8px 0" : "4px 0",
+              borderTop: r.bold ? "1px solid #e8e4de" : "none",
+              marginTop: r.bold ? 4 : 0,
+            }}>
+              <span style={{ fontWeight: r.bold ? 700 : 400, color: "#555" }}>{r.label}</span>
+              <span style={{
+                fontWeight: r.bold ? 800 : 600,
+                fontSize: r.big ? 15 : 13,
+                color: r.big ? (r.val >= 0 ? "#2D6A4F" : "#C1121F") : "#333",
+              }}>
+                {r.val < 0 ? "-" : ""}{fmtWon(Math.abs(r.val))}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* 세금 상세 */}
+        <div style={{
+          marginTop: 10, padding: "12px 14px", borderRadius: 10,
+          background: "#f9f7f4", fontSize: 12,
+        }}>
+          <div style={{ fontWeight: 700, color: "#694634", marginBottom: 8, fontSize: 13 }}>📋 세금 산출 내역</div>
+
+          <div style={{ marginBottom: 8, paddingBottom: 8, borderBottom: "1px solid #ece8e2" }}>
+            <div style={{ fontWeight: 700, color: "#555", marginBottom: 4 }}>부가세 ({periodLabel})</div>
+            {[
+              { label: "매출세액", val: fmtWon(result.vatSales) },
+              { label: "매입세액", val: "-" + fmtWon(result.vatPurchase) },
+            ].map((r, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", color: "#777" }}>
+                <span>{r.label}</span><span>{r.val}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 700, color: "#333" }}>
+              <span>납부 부가세</span><span>{fmtWon(result.vatPayable)}</span>
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 700, color: "#555", marginBottom: 4 }}>종합소득세 (연간 기준)</div>
+            {[
+              { label: "과세표준 (연)", val: fmtWon(result.taxableIncome) },
+              { label: "적용 세율 구간", val: result.bracketLabel },
+              { label: "누진공제", val: fmtWon(result.bracketDed) },
+              { label: "산출세액 (연)", val: fmtWon(result.annualTax) },
+            ].map((r, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", color: "#777" }}>
+                <span>{r.label}</span><span>{r.val}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 700, color: "#333" }}>
+              <span>종소세 ({periodLabel})</span><span>{fmtWon(result.tax)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", color: "#777" }}>
+              <span>실효세율</span><span>{result.effectiveRate.toFixed(1)}%</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 700, color: "#333", borderTop: "1px solid #ece8e2", marginTop: 4 }}>
+              <span>지방소득세 ({periodLabel})</span><span>{fmtWon(result.localTax)}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* 순이익 */}
+        <div style={{
+          marginTop: 12, padding: "14px 16px", borderRadius: 10,
+          background: isPositive ? "#f0faf4" : "#fef2f2",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+        }}>
+          <span style={{ fontSize: 14, fontWeight: 800, color: "#333" }}>순이익</span>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 20, fontWeight: 900, color: isPositive ? "#2D6A4F" : "#C1121F" }}>
+              {result.net < 0 ? "-" : ""}{fmtWon(Math.abs(result.net))}
+            </div>
+            <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
+              순이익률 {result.netMargin.toFixed(1)}%
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const defaultPartner = {};
+  const defaultGeneral = {};
+  PRODUCTS.forEach((p) => { defaultPartner[p.id] = 20; defaultGeneral[p.id] = 5; });
+
+  const [partnerQty, setPartnerQty] = useState(defaultPartner);
+  const [generalQty, setGeneralQty] = useState(defaultGeneral);
+
+  const DEFAULT_COSTS = {
+    rent: 150, deposit: 83, staff: 250, fourInsurance: 25,
+    vehicle: 80, delivery: 30, telecom: 10, insurance: 15,
+    utilities: 10, office: 10, marketing: 100, entertain: 30,
+    accounting: 15, software: 5, as_reserve: 30, misc: 20,
+  };
+
+  const [costs, setCosts] = useState({ ...DEFAULT_COSTS });
+  const resetCosts = () => setCosts({ ...DEFAULT_COSTS });
+  const updateCost = (key, val) => setCosts(prev => ({ ...prev, [key]: Math.max(0, parseInt(val) || 0) }));
+  const fixedMonthly = Object.values(costs).reduce((a, b) => a + b, 0) * 10000;
+
+  const costItems = [
+    { key: "rent", label: "사무실/창고 임대료", icon: "🏠" },
+    { key: "deposit", label: "보증금 이자비용", icon: "🔑" },
+    { key: "staff", label: "인건비 (본인 포함)", icon: "👤" },
+    { key: "fourInsurance", label: "4대보험", icon: "🛡️" },
+    { key: "vehicle", label: "차량유지/유류비", icon: "🚗" },
+    { key: "delivery", label: "택배/배송비", icon: "📦" },
+    { key: "telecom", label: "통신비", icon: "📱" },
+    { key: "insurance", label: "사업자보험", icon: "🔒" },
+    { key: "utilities", label: "전기/수도/관리비", icon: "💡" },
+    { key: "office", label: "사무용품/소모품", icon: "🖊️" },
+    { key: "marketing", label: "광고/마케팅비", icon: "📣" },
+    { key: "entertain", label: "접대비/영업경비", icon: "🍽️" },
+    { key: "accounting", label: "세무/회계 기장료", icon: "📋" },
+    { key: "software", label: "소프트웨어/구독료", icon: "💻" },
+    { key: "as_reserve", label: "반품/불량 충당금", icon: "🔧" },
+    { key: "misc", label: "예비비/기타", icon: "📌" },
+  ];
+
+  const [commissionRate, setCommissionRate] = useState(0);
+
+  const partnerSales = PRODUCTS.map((p) => ({ id: p.id, qty: partnerQty[p.id] }));
+  const generalSales = PRODUCTS.map((p) => ({ id: p.id, qty: generalQty[p.id] }));
+
+  const partnerMonthly = useMemo(() => calcPnL(partnerSales, "partner", fixedMonthly, 1, commissionRate), [partnerQty, fixedMonthly, commissionRate]);
+  const partnerYearly = useMemo(() => calcPnL(partnerSales, "partner", fixedMonthly, 12, commissionRate), [partnerQty, fixedMonthly, commissionRate]);
+  const generalMonthly = useMemo(() => calcPnL(generalSales, "general", fixedMonthly, 1, commissionRate), [generalQty, fixedMonthly, commissionRate]);
+  const generalYearly = useMemo(() => calcPnL(generalSales, "general", fixedMonthly, 12, commissionRate), [generalQty, fixedMonthly, commissionRate]);
+
+  const brand = "#694634";
+  const bg = "#EEE9E1";
+  const [tab, setTab] = useState("partner");
+
+  const InputRow = ({ label, emoji, sub, priceLabel, value, onChange }) => (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "8px 0",
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{emoji} {label}</div>
+        <div style={{ fontSize: 10, color: "#aaa" }}>{sub} · {priceLabel}</div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+        <button onClick={() => onChange(Math.max(0, value - 1))} style={{
+          width: 26, height: 26, borderRadius: 7, border: "1.5px solid #ddd",
+          background: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", color: "#666",
+        }}>-</button>
+        <input type="number" min="0" value={value}
+          onChange={(e) => onChange(Math.max(0, parseInt(e.target.value) || 0))}
+          style={{
+            width: 46, padding: "5px 3px", borderRadius: 7, border: "1.5px solid #ddd",
+            fontSize: 14, fontWeight: 800, textAlign: "center", outline: "none",
+          }}
+        />
+        <button onClick={() => onChange(value + 1)} style={{
+          width: 26, height: 26, borderRadius: 7, border: "1.5px solid #ddd",
+          background: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", color: "#666",
+        }}>+</button>
+        <span style={{ fontSize: 10, color: "#aaa", width: 28 }}>개/월</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{
+      fontFamily: "'Pretendard Variable', Pretendard, -apple-system, sans-serif",
+      background: bg, minHeight: "100vh", padding: "20px", color: "#1a1a1a",
+    }}>
+      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        <div style={{ marginBottom: 24 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: brand, margin: 0, letterSpacing: "-0.5px" }}>
+            어썸웰스파 코스메틱 총판
+          </h1>
+          <p style={{ fontSize: 13, color: "#888", margin: "4px 0 0" }}>채널별 수익 비교 시뮬레이터</p>
+        </div>
+
+        {/* Tab */}
+        <div style={{ display: "flex", gap: 0, marginBottom: 20, borderRadius: 10, overflow: "hidden", border: "1.5px solid #ddd" }}>
+          <button onClick={() => setTab("partner")} style={{
+            flex: 1, padding: "12px 0", border: "none", fontSize: 14, fontWeight: 800, cursor: "pointer",
+            background: tab === "partner" ? "#D4760A" : "#fff",
+            color: tab === "partner" ? "#fff" : "#999",
+            transition: "all 0.2s",
+          }}>🤝 가맹점 판매</button>
+          <button onClick={() => setTab("general")} style={{
+            flex: 1, padding: "12px 0", border: "none", fontSize: 14, fontWeight: 800, cursor: "pointer",
+            background: tab === "general" ? "#1B4D7A" : "#fff",
+            color: tab === "general" ? "#fff" : "#999",
+            transition: "all 0.2s",
+          }}>🏪 일반 판매</button>
+        </div>
+
+        {/* 판매 수량 입력 */}
+        <div style={{
+          background: "#fff", borderRadius: 14, padding: "16px 18px", marginBottom: 20,
+          boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+        }}>
+          <h3 style={{ fontSize: 14, fontWeight: 800, color: tab === "partner" ? "#D4760A" : "#1B4D7A", margin: "0 0 12px" }}>
+            {tab === "partner" ? "🤝 가맹점 판매 수량 (월)" : "🏪 일반 판매 수량 (월)"}
+          </h3>
+          {PRODUCTS.map((p) => (
+            <InputRow key={p.id} label={p.name} emoji={p.emoji} sub={p.sub}
+              priceLabel={`${(tab === "partner" ? p.partner : p.general).toLocaleString()}원`}
+              value={tab === "partner" ? partnerQty[p.id] : generalQty[p.id]}
+              onChange={(v) => tab === "partner"
+                ? setPartnerQty((prev) => ({ ...prev, [p.id]: v }))
+                : setGeneralQty((prev) => ({ ...prev, [p.id]: v }))
+              }
+            />
+          ))}
+        </div>
+
+        {/* 고정비 */}
+        <div style={{
+          background: "#fff", borderRadius: 14, padding: "16px 18px", marginBottom: 20,
+          boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 800, color: brand, margin: 0 }}>🏢 월 고정비</h3>
+            <span style={{ fontSize: 16, fontWeight: 900, color: brand }}>{Object.values(costs).reduce((a, b) => a + b, 0).toLocaleString()}만원</span>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <button onClick={resetCosts} style={{
+              padding: "8px 16px", borderRadius: 8, border: "1.5px solid #ccc",
+              background: "#faf8f5", fontSize: 13, fontWeight: 700, color: brand,
+              cursor: "pointer", width: "100%",
+            }}>↩️ 기본값으로 초기화</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+            {costItems.map((item, i) => (
+              <div key={item.key} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "9px 0",
+                borderBottom: i < costItems.length - 1 ? "1px solid #f3f0ec" : "none",
+              }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{item.icon} {item.label}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <button onClick={() => updateCost(item.key, 0)} style={{
+                    padding: "5px 8px", borderRadius: 6, border: "1.5px solid #e0dbd5",
+                    background: costs[item.key] === 0 ? brand : "#f5f2ee",
+                    color: costs[item.key] === 0 ? "#fff" : "#999",
+                    fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+                  }}>없음</button>
+                  <input type="number" min="0" value={costs[item.key]}
+                    onChange={(e) => updateCost(item.key, e.target.value)}
+                    style={{
+                      width: 80, padding: "6px 8px", borderRadius: 8, border: "1.5px solid #ddd",
+                      fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none",
+                    }}
+                  />
+                  <span style={{ fontSize: 12, color: "#999" }}>만</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 위탁판매 수수료 */}
+        <div style={{
+          background: "#fff", borderRadius: 14, padding: "16px 18px", marginBottom: 20,
+          boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div>
+              <span style={{ fontSize: 14, fontWeight: 800, color: brand }}>🤝 위탁판매 수수료</span>
+              <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>매출액 대비 % 차감</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button onClick={() => setCommissionRate(0)} style={{
+                padding: "5px 8px", borderRadius: 6, border: "1.5px solid #e0dbd5",
+                background: commissionRate === 0 ? brand : "#f5f2ee",
+                color: commissionRate === 0 ? "#fff" : "#999",
+                fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+              }}>없음</button>
+              <input type="number" min="0" max="100" step="0.5" value={commissionRate}
+                onChange={(e) => setCommissionRate(Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                style={{
+                  width: 55, padding: "6px 8px", borderRadius: 8, border: "1.5px solid #ddd",
+                  fontSize: 14, fontWeight: 700, textAlign: "right", outline: "none",
+                }}
+              />
+              <span style={{ fontSize: 12, color: "#999" }}>%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* P&L Cards - 탭에 맞는 채널만 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
+          {tab === "partner" ? (<>
+            <PnLCard title="🤝 가맹점 판매" color="#D4760A" result={partnerMonthly} period={1} />
+            <PnLCard title="🤝 가맹점 판매" color="#D4760A" result={partnerYearly} period={12} />
+          </>) : (<>
+            <PnLCard title="🏪 일반 판매" color="#1B4D7A" result={generalMonthly} period={1} />
+            <PnLCard title="🏪 일반 판매" color="#1B4D7A" result={generalYearly} period={12} />
+          </>)}
+        </div>
+
+        <div style={{ textAlign: "center", fontSize: 11, color: "#bbb", padding: "0 0 20px" }}>
+          * 시뮬레이션 참고용. 실제 세금은 세무사 상담 권장. 누진공제 적용된 실효세율 기준.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
